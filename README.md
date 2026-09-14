@@ -20,7 +20,7 @@
 
 ## Требования
 
-- Windows 10/11 или другая ОС с Python.
+- Windows 10/11 или macOS. Linux также должен работать при наличии тех же зависимостей.
 - Python 3.12 рекомендуется для текущей сборки.
 - FFmpeg должен быть установлен и доступен через `PATH`.
 - Discord-приложение с ботом, добавленным на сервер через **Guild Install**.
@@ -33,6 +33,8 @@ ffmpeg -version
 ```
 
 ## Установка
+
+### Windows 10/11
 
 Создай виртуальное окружение:
 
@@ -58,6 +60,85 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 pip install -r requirements.txt
 ```
 
+FFmpeg на Windows должен быть установлен отдельно и доступен через `PATH`:
+
+```powershell
+ffmpeg -version
+```
+
+### macOS
+
+Проект не содержит Windows-специфичной логики и может запускаться на macOS без изменений исходного кода. Основные отличия — установка системных зависимостей и команды активации виртуального окружения.
+
+Рекомендуемый вариант — Homebrew. Установи Python 3.12, FFmpeg и Opus:
+
+```bash
+brew install python@3.12 ffmpeg opus
+```
+
+Проверь установку:
+
+```bash
+python3.12 --version
+ffmpeg -version
+```
+
+Создай виртуальное окружение из корня проекта:
+
+```bash
+python3.12 -m venv venv
+```
+
+Активируй его:
+
+```bash
+source venv/bin/activate
+```
+
+Установи Python-зависимости:
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Создай `.env` из примера:
+
+```bash
+cp .env.example .env
+```
+
+Заполни `DISCORD_TOKEN` и `GUILD_ID`, затем запусти бота:
+
+```bash
+python bot.py
+```
+
+Для выхода из виртуального окружения:
+
+```bash
+deactivate
+```
+
+#### macOS: возможная проблема с Opus
+
+Текущий плеер использует `discord.FFmpegPCMAudio`, поэтому Discord должен иметь доступ к библиотеке Opus. Обычно после `brew install opus` библиотека определяется автоматически. Если бот подключается к voice-каналу, но воспроизведение падает с ошибкой `OpusNotLoaded`, сначала проверь наличие библиотеки:
+
+```bash
+brew list opus
+```
+
+Также проверь, что проект запущен именно из активированного `venv`, а `ffmpeg` виден из того же терминала:
+
+```bash
+which python
+which ffmpeg
+```
+
+#### Apple Silicon и Intel
+
+Сам Python-код архитектурно независим от процессора. Homebrew предоставляет готовые пакеты FFmpeg и Opus для современных Mac на Apple Silicon и поддерживаемых Intel-моделях. Важно лишь не смешивать зависимости разных архитектур в одном `venv`.
+
 ## Настройка `.env`
 
 Скопируй `.env.example` в `.env` и заполни значения:
@@ -82,7 +163,9 @@ SEARCH_LIMIT=5
 
 ## Запуск
 
-```powershell
+После активации `venv` команда одинакова на Windows и macOS:
+
+```text
 python bot.py
 ```
 
@@ -92,6 +175,18 @@ python bot.py
 Slash-команды зарегистрированы: ...
 Бот запущен: MusicBot#....
 ```
+
+## Совместимость Windows / macOS
+
+Логика проекта одинакова на обеих системах:
+
+- Discord API и slash-команды работают одинаково;
+- очередь и idle-disconnect используют `asyncio` и не зависят от ОС;
+- Hitmo-провайдер выполняет обычные HTTP-запросы через `httpx`;
+- FFmpeg запускается как внешний процесс через `discord.py`;
+- пути к файлам в основном коде не захардкожены под Windows.
+
+Отличаются только установка системных программ и путь виртуального окружения (`venv\Scripts` на Windows против `venv/bin` на macOS).
 
 ## Обычный сценарий использования
 
@@ -159,7 +254,8 @@ MusicBot/
 ├── .gitignore
 ├── README.md
 ├── docs/
-│   └── architecture.md
+│   ├── architecture.md
+│   └── macos.md
 │
 └── music_bot/
     ├── app.py
@@ -192,7 +288,7 @@ MusicBot/
 - `music/player.py` — воспроизведение, очередь, `skip`, `stop` и idle-disconnect.
 - `ui/track_select.py` — Discord-кнопки выбора найденного трека.
 
-Подробнее архитектура описана в [`docs/architecture.md`](docs/architecture.md).
+Подробнее архитектура описана в [`docs/architecture.md`](docs/architecture.md). Отдельная инструкция для macOS находится в [`docs/macos.md`](docs/macos.md).
 
 ## Сетевой поток
 
