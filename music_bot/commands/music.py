@@ -30,6 +30,29 @@ class MusicCog(commands.Cog):
         await interaction.response.send_message("Pong!")
 
     @app_commands.command(
+        name="help",
+        description="Показать список команд бота",
+    )
+    async def help(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="🎵 Команды бота",
+            description=(
+                "`/play <запрос>` — найти и выбрать трек\n"
+                "`/queue` — показать очередь воспроизведения\n"
+                "`/skip` — пропустить текущий трек\n"
+                "`/stop` — остановить музыку и очистить очередь\n"
+                "`/join` — подключить бота к твоему голосовому каналу\n"
+                "`/leave` — отключить бота от голосового канала\n"
+                "`/ping` — проверить работу бота"
+            ),
+        )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+    @app_commands.command(
         name="join",
         description="Подключить бота к твоему голосовому каналу",
     )
