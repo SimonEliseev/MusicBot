@@ -47,10 +47,10 @@ class MusicCog(commands.Cog):
             ),
         )
 
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True,
-    )
+        await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="join",
