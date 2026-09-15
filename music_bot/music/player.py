@@ -5,10 +5,16 @@ from collections import defaultdict, deque
 
 import discord
 
-from music_bot.audio.windows import WindowsAudioCapture
 from music_bot.music.models import QueueItem, TrackCandidate
 from music_bot.providers.hitmo import USER_AGENT
 from music_bot.providers.vk.player import VKPlayer, VKTrack
+
+from music_bot.audio.factory import create_audio_capture
+from music_bot.music.models import (
+    MusicSource,
+    QueueItem,
+    TrackCandidate,
+)
 
 
 class MusicPlayer:
@@ -26,7 +32,7 @@ class MusicPlayer:
         self.live_end_tasks: dict[int, asyncio.Task[None]] = {}
 
         self.vk_player = VKPlayer()
-        self.vk_audio = WindowsAudioCapture()
+        self.audio_capture = create_audio_capture()
 
     def get_queue(self, guild_id: int) -> deque[QueueItem]:
         return self.queues[guild_id]
@@ -51,8 +57,9 @@ class MusicPlayer:
             TrackCandidate(
                 title=track.title,
                 artist=track.artist,
+                track_id=track.track_id,
                 duration=track.duration,
-                source="vk",
+                source=MusicSource.VK,
             )
             for track in tracks
         ]
@@ -88,7 +95,7 @@ class MusicPlayer:
 
         self.current_tracks[guild_id] = item
 
-        if item.track.source == "vk":
+        if item.track.source is MusicSource.VK:
             await self._start_vk_track(
                 voice_client,
                 item,
@@ -131,32 +138,22 @@ class MusicPlayer:
         if self.vk_player.page is None:
             await self.vk_player.start()
 
-        query = (
-            f"{item.track.artist} "
-            f"{item.track.title}"
-        )
-
-        results = await self.vk_player.search(
-            query,
-            limit=20,
-        )
-
-        if not results:
+        if not item.track.track_id:
             raise RuntimeError(
-                f"VK не нашёл трек {item.track.display_name}"
+                "У VK-трека отсутствует track_id"
             )
 
-        vk_track = self._match_vk_track(
-            item.track,
-            results,
+        query = f"{item.track.artist} {item.track.title}"
+
+        vk_track = await self.vk_player.find_track(
+            query=query,
+            track_id=item.track.track_id,
         )
 
-        # FFmpeg начинает слушать VB-CABLE ещё до запуска трека.
-        source = self.vk_audio.create_source()
-
-        await asyncio.sleep(0.2)
+        source = self.audio_capture.create_source()
 
         try:
+            await asyncio.sleep(0.2)
             await self.vk_player.play(vk_track)
         except Exception:
             source.cleanup()
@@ -255,7 +252,7 @@ class MusicPlayer:
 
             provider = (
                 "VK"
-                if item.track.source == "vk"
+                if item.track.source is MusicSource.VK
                 else "Hitmo"
             )
 
@@ -321,7 +318,7 @@ class MusicPlayer:
         if current is None:
             return
 
-        if current.track.source != "vk":
+        if current.track.source is not MusicSource.VK:
             return
 
         try:
@@ -509,51 +506,3 @@ class MusicPlayer:
             )
 
         return None
-
-    @staticmethod
-    def _match_vk_track(
-        wanted: TrackCandidate,
-        candidates: list[VKTrack],
-    ) -> VKTrack:
-        def normalize(value: str) -> str:
-            return " ".join(
-                value.replace("\xa0", " ")
-                .casefold()
-                .split()
-            )
-
-        wanted_artist = normalize(
-            wanted.artist
-        )
-        wanted_title = normalize(
-            wanted.title
-        )
-
-        def score(track: VKTrack) -> int:
-            result = 0
-
-            artist = normalize(track.artist)
-            title = normalize(track.title)
-
-            if artist == wanted_artist:
-                result += 100
-            elif wanted_artist in artist:
-                result += 40
-
-            if title == wanted_title:
-                result += 100
-            elif wanted_title in title:
-                result += 40
-
-            if (
-                wanted.duration
-                and track.duration == wanted.duration
-            ):
-                result += 20
-
-            return result
-
-        return max(
-            candidates,
-            key=score,
-        )

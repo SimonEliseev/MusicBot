@@ -14,6 +14,7 @@ from playwright.async_api import (
 @dataclass
 class VKTrack:
     index: int
+    track_id: str
     artist: str
     title: str
     duration: str
@@ -98,6 +99,8 @@ class VKPlayer:
                 '[data-testid="MusicTrackRow_Title"]'
             ).first
 
+            track_id = await title_locator.get_attribute("href")
+
             duration_locator = row.locator(
                 '[data-testid="MusicTrackRow_Duration"]'
             ).first
@@ -118,12 +121,13 @@ class VKPlayer:
             except Exception:
                 continue
 
-            if not artist or not title:
+            if not artist or not title or not track_id:
                 continue
 
             tracks.append(
                 VKTrack(
                     index=index,
+                    track_id=track_id,
                     artist=artist,
                     title=title,
                     duration=duration,
@@ -131,6 +135,25 @@ class VKPlayer:
             )
 
         return tracks
+
+    async def find_track(
+        self,
+        query: str,
+        track_id: str,
+        limit: int = 50,
+    ) -> VKTrack:
+        tracks = await self.search(
+            query,
+            limit=limit,
+        )
+
+        for track in tracks:
+            if track.track_id == track_id:
+                return track
+
+        raise RuntimeError(
+            f"VK-трек {track_id} больше не найден"
+        )
 
     async def play(
         self,

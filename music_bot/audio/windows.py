@@ -6,14 +6,17 @@ class WindowsAudioCapture:
         self,
         device_name: str = "CABLE Output (VB-Audio Virtual Cable)",
         ffmpeg_executable: str = "ffmpeg",
-    ):
+    ) -> None:
         self.device_name = device_name
         self.ffmpeg_executable = ffmpeg_executable
 
-    def create_source(self) -> discord.FFmpegPCMAudio:
+    def create_source(self) -> discord.AudioSource:
         return discord.FFmpegPCMAudio(
-            source=f'audio={self.device_name}',
+            source=f"audio={self.device_name}",
             executable=self.ffmpeg_executable,
-            before_options="-f dshow -audio_buffer_size 100",
-            options="-vn -ar 48000 -ac 2",
+            before_options="-f dshow",
+            options="-vn",
         )
+
+    async def close(self) -> None:
+        pass
