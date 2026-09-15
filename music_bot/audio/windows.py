@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import discord
+
+from music_bot.audio.live_ffmpeg import LiveFFmpegSource
 
 
 class WindowsAudioCapture:
@@ -11,11 +15,14 @@ class WindowsAudioCapture:
         self.ffmpeg_executable = ffmpeg_executable
 
     def create_source(self) -> discord.AudioSource:
-        return discord.FFmpegPCMAudio(
-            source=f"audio={self.device_name}",
+        return LiveFFmpegSource(
             executable=self.ffmpeg_executable,
-            before_options="-f dshow",
-            options="-vn",
+            input_args=[
+                "-f",
+                "dshow",
+                "-i",
+                f"audio={self.device_name}",
+            ],
         )
 
     async def close(self) -> None:

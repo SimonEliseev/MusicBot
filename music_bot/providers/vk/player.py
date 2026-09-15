@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import asyncio
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -7,13 +10,16 @@ from playwright.async_api import (
     BrowserContext,
     Page,
     Playwright,
+    TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
 
 
-@dataclass
+VK_AUDIO_URL = "https://vk.ru/audio"
+
+
+@dataclass(slots=True)
 class VKTrack:
-    index: int
     track_id: str
     artist: str
     title: str
@@ -24,10 +30,13 @@ class VKTrack:
 
 
 class VKPlayer:
-    def __init__(self):
+    def __init__(self) -> None:
         self.playwright: Playwright | None = None
         self.context: BrowserContext | None = None
-        self.page: Page | None = None
+        self.prepared_track_id: str | None = None
+
+        self.search_page: Page | None = None
+        self.playback_page: Page | None = None
 
         self.current_track: VKTrack | None = None
 
@@ -35,51 +44,130 @@ class VKPlayer:
             Path(__file__).resolve().parent / "browser_profile"
         )
 
-    async def start(self) -> None:
-        self.playwright = await async_playwright().start()
-
-        self.context = await self.playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile_dir),
-            channel="chrome",
-            headless=False,
-            args=[
-                "--autoplay-policy=no-user-gesture-required",
-            ],
+    @property
+    def is_started(self) -> bool:
+        return (
+            self.context is not None
+            and self.search_page is not None
+            and self.playback_page is not None
         )
 
-        if self.context.pages:
-            self.page = self.context.pages[0]
-        else:
-            self.page = await self.context.new_page()
+    async def prepare(
+        self,
+        track: VKTrack,
+    ) -> None:
+        page = self._get_playback_page()
 
-        await self.page.goto(
-            "https://vk.ru/audio",
+        query = quote_plus(
+            f"{track.artist} {track.title}"
+        )
+
+        await page.goto(
+            f"{VK_AUDIO_URL}?q={query}",
             wait_until="domcontentloaded",
         )
+
+        title = page.locator(
+            (
+                '[data-testid="MusicTrackRow_Title"]'
+                f'[href="{track.track_id}"]'
+            )
+        ).first
+
+        await title.wait_for(
+            state="visible",
+            timeout=10_000,
+        )
+
+        row = title.locator(
+            "xpath=ancestor::*[@data-testid='MusicTrackRow'][1]"
+        )
+
+        button = row.locator(
+            ":scope > [role='button']"
+        ).first
+
+        await button.wait_for(
+            state="attached",
+            timeout=5_000,
+        )
+
+        self.prepared_track_id = track.track_id
+
+    async def start(self) -> None:
+        if self.is_started:
+            return
+
+        self.playwright = await async_playwright().start()
+
+        try:
+            self.context = (
+                await self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(self.profile_dir),
+                    channel="chrome",
+                    headless=False,
+                    args=[
+                        "--autoplay-policy=no-user-gesture-required",
+                    ],
+                )
+            )
+
+            pages = self.context.pages
+
+            if pages:
+                self.playback_page = pages[0]
+            else:
+                self.playback_page = await self.context.new_page()
+
+            if len(pages) >= 2:
+                self.search_page = pages[1]
+            else:
+                self.search_page = await self.context.new_page()
+
+            # Закрываем лишние восстановленные вкладки.
+            for page in pages[2:]:
+                await page.close()
+
+            await asyncio.gather(
+                self.playback_page.goto(
+                    VK_AUDIO_URL,
+                    wait_until="domcontentloaded",
+                ),
+                self.search_page.goto(
+                    VK_AUDIO_URL,
+                    wait_until="domcontentloaded",
+                ),
+            )
+
+        except Exception:
+            await self.stop()
+            raise
 
     async def search(
         self,
         query: str,
         limit: int = 10,
     ) -> list[VKTrack]:
-        if self.page is None:
-            raise RuntimeError("VKPlayer не запущен")
+        page = self._get_search_page()
 
         encoded_query = quote_plus(query)
 
-        await self.page.goto(
-            f"https://vk.ru/audio?q={encoded_query}",
+        await page.goto(
+            f"{VK_AUDIO_URL}?q={encoded_query}",
             wait_until="domcontentloaded",
         )
 
-        rows = self.page.locator(
+        rows = page.locator(
             '[data-testid="MusicTrackRow"]'
         )
 
-        await rows.first.wait_for(
-            state="visible",
-            timeout=10_000,
-        )
+        try:
+            await rows.first.wait_for(
+                state="visible",
+                timeout=10_000,
+            )
+        except PlaywrightTimeoutError:
+            return []
 
         count = min(
             await rows.count(),
@@ -99,8 +187,6 @@ class VKPlayer:
                 '[data-testid="MusicTrackRow_Title"]'
             ).first
 
-            track_id = await title_locator.get_attribute("href")
-
             duration_locator = row.locator(
                 '[data-testid="MusicTrackRow_Duration"]'
             ).first
@@ -118,6 +204,10 @@ class VKPlayer:
                     await duration_locator.inner_text()
                 ).strip()
 
+                track_id = await title_locator.get_attribute(
+                    "href"
+                )
+
             except Exception:
                 continue
 
@@ -126,7 +216,6 @@ class VKPlayer:
 
             tracks.append(
                 VKTrack(
-                    index=index,
                     track_id=track_id,
                     artist=artist,
                     title=title,
@@ -136,177 +225,146 @@ class VKPlayer:
 
         return tracks
 
-    async def find_track(
-        self,
-        query: str,
-        track_id: str,
-        limit: int = 50,
-    ) -> VKTrack:
-        tracks = await self.search(
-            query,
-            limit=limit,
-        )
-
-        for track in tracks:
-            if track.track_id == track_id:
-                return track
-
-        raise RuntimeError(
-            f"VK-трек {track_id} больше не найден"
-        )
-
     async def play(
         self,
         track: VKTrack,
     ) -> None:
-        if self.page is None:
-            raise RuntimeError("VKPlayer не запущен")
+        if self.prepared_track_id != track.track_id:
+            await self.prepare(track)
 
-        rows = self.page.locator(
-            '[data-testid="MusicTrackRow"]'
-        )
+        page = self._get_playback_page()
 
-        if track.index >= await rows.count():
-            raise RuntimeError(
-                f"Трек с index={track.index} "
-                "больше не существует на странице"
+        title = page.locator(
+            (
+                '[data-testid="MusicTrackRow_Title"]'
+                f'[href="{track.track_id}"]'
             )
+        ).first
 
-        row = rows.nth(track.index)
-
-        await row.scroll_into_view_if_needed()
+        row = title.locator(
+            "xpath=ancestor::*[@data-testid='MusicTrackRow'][1]"
+        )
 
         button = row.locator(
-            ':scope > [role="button"][aria-label="Начать прослушивание"]'
+            ":scope > [role='button']"
         ).first
 
-        await button.wait_for(
-            state="attached",
-            timeout=5_000,
+        aria_label = self._normalize_label(
+            await button.get_attribute("aria-label")
         )
 
-        await button.press("Enter")
+        if aria_label != "Поставить на паузу":
+            await button.press("Enter")
 
         self.current_track = track
-
-    async def pause_active(self) -> None:
-        if self.page is None:
-            raise RuntimeError("VKPlayer не запущен")
-
-        pause_button = self.page.locator(
-            '[role="button"][aria-label="Поставить на\u00a0паузу"]'
-        ).first
-
-        if await pause_button.count():
-            await pause_button.press("Enter")                           
+        self.prepared_track_id = None
 
     async def pause(self) -> None:
-        if self.current_track is None:
-            raise RuntimeError("Нет текущего трека")
-
         button = await self._get_current_track_button()
 
-        aria_label = await button.get_attribute(
-            "aria-label"
+        aria_label = self._normalize_label(
+            await button.get_attribute("aria-label")
         )
 
-        if aria_label == "Поставить на\u00a0паузу":
+        if aria_label == "Поставить на паузу":
             await button.press("Enter")
 
     async def resume(self) -> None:
-        if self.current_track is None:
-            raise RuntimeError("Нет текущего трека")
-
         button = await self._get_current_track_button()
 
-        aria_label = await button.get_attribute(
-            "aria-label"
+        aria_label = self._normalize_label(
+            await button.get_attribute("aria-label")
         )
 
         if aria_label == "Начать прослушивание":
             await button.press("Enter")
 
+    async def pause_active(self) -> None:
+        if self.playback_page is None:
+            return
+
+        button = self.playback_page.get_by_role(
+            "button",
+            name=re.compile(
+                r"Поставить на\s+паузу",
+                re.IGNORECASE,
+            ),
+        ).first
+
+        if await button.count():
+            try:
+                await button.press(
+                    "Enter",
+                    timeout=2_000,
+                )
+            except Exception:
+                pass
+
+    async def stop(self) -> None:
+        try:
+            self.prepared_track_id = None
+            await self.pause_active()
+
+            if self.context is not None:
+                await self.context.close()
+
+        finally:
+            if self.playwright is not None:
+                await self.playwright.stop()
+
+            self.playwright = None
+            self.context = None
+
+            self.search_page = None
+            self.playback_page = None
+
+            self.current_track = None
+
     async def _get_current_track_button(self):
-        if self.page is None:
-            raise RuntimeError("VKPlayer не запущен")
-
         if self.current_track is None:
-            raise RuntimeError("Нет текущего трека")
+            raise RuntimeError("Нет текущего VK-трека")
 
-        rows = self.page.locator(
-            '[data-testid="MusicTrackRow"]'
+        page = self._get_playback_page()
+
+        title = page.locator(
+            (
+                '[data-testid="MusicTrackRow_Title"]'
+                f'[href="{self.current_track.track_id}"]'
+            )
+        ).first
+
+        await title.wait_for(
+            state="visible",
+            timeout=5_000,
         )
 
-        if self.current_track.index >= await rows.count():
-            raise RuntimeError(
-                "Строка текущего трека больше не найдена"
-            )
-
-        row = rows.nth(
-            self.current_track.index
+        row = title.locator(
+            "xpath=ancestor::*[@data-testid='MusicTrackRow'][1]"
         )
 
         return row.locator(
             ":scope > [role='button']"
         ).first
 
-    async def stop(self) -> None:
-        if self.context is not None:
-            await self.context.close()
-            self.context = None
+    def _get_search_page(self) -> Page:
+        if self.search_page is None:
+            raise RuntimeError("VKPlayer не запущен")
 
-        if self.playwright is not None:
-            await self.playwright.stop()
-            self.playwright = None
+        return self.search_page
 
-        self.page = None
-        self.current_track = None
+    def _get_playback_page(self) -> Page:
+        if self.playback_page is None:
+            raise RuntimeError("VKPlayer не запущен")
 
+        return self.playback_page
 
-async def main():
-    player = VKPlayer()
+    @staticmethod
+    def _normalize_label(
+        label: str | None,
+    ) -> str:
+        if not label:
+            return ""
 
-    try:
-        await player.start()
-
-        tracks = await player.search(
-            "Linkin Park Numb",
-            limit=10,
+        return " ".join(
+            label.replace("\xa0", " ").split()
         )
-
-        print("Найденные треки:\n")
-
-        for number, track in enumerate(
-            tracks,
-            start=1,
-        ):
-            print(f"{number}. {track}")
-
-        if len(tracks) < 2:
-            print("Нужный тестовый трек не найден")
-            return
-
-        track = tracks[1]
-
-        print(f"\n▶ {track}")
-        await player.play(track)
-
-        print("\nEnter → PAUSE")
-        await asyncio.to_thread(input)
-
-        await player.pause()
-
-        print("Enter → RESUME")
-        await asyncio.to_thread(input)
-
-        await player.resume()
-
-        print("Enter → EXIT")
-        await asyncio.to_thread(input)
-
-    finally:
-        await player.stop()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

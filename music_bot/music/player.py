@@ -5,7 +5,6 @@ from collections import defaultdict, deque
 
 import discord
 
-from music_bot.music.models import QueueItem, TrackCandidate
 from music_bot.providers.hitmo import USER_AGENT
 from music_bot.providers.vk.player import VKPlayer, VKTrack
 
@@ -25,6 +24,7 @@ class MusicPlayer:
     ) -> None:
         self.client = client
         self.idle_timeout_seconds = idle_timeout_seconds
+        self._closing = False
 
         self.queues: defaultdict[int, deque[QueueItem]] = defaultdict(deque)
         self.current_tracks: dict[int, QueueItem] = {}
@@ -45,7 +45,7 @@ class MusicPlayer:
         query: str,
         limit: int,
     ) -> list[TrackCandidate]:
-        if self.vk_player.page is None:
+        if not self.vk_player.is_started:
             await self.vk_player.start()
 
         tracks = await self.vk_player.search(
@@ -69,6 +69,10 @@ class MusicPlayer:
         voice_client: discord.VoiceClient,
         item: QueueItem,
     ) -> int | None:
+        if self._closing:
+            raise RuntimeError(
+                "MusicPlayer завершает работу"
+            )
         guild_id = voice_client.guild.id
 
         if voice_client.is_playing() or voice_client.is_paused():
@@ -135,7 +139,7 @@ class MusicPlayer:
         voice_client: discord.VoiceClient,
         item: QueueItem,
     ) -> None:
-        if self.vk_player.page is None:
+        if not self.vk_player.is_started:
             await self.vk_player.start()
 
         if not item.track.track_id:
@@ -143,26 +147,42 @@ class MusicPlayer:
                 "У VK-трека отсутствует track_id"
             )
 
-        query = f"{item.track.artist} {item.track.title}"
-
-        vk_track = await self.vk_player.find_track(
-            query=query,
+        vk_track = VKTrack(
             track_id=item.track.track_id,
+            artist=item.track.artist,
+            title=item.track.title,
+            duration=item.track.duration or "",
         )
 
+        # Сначала полностью готовим страницу VK.
+        # FFmpeg на этом этапе ещё вообще не существует.
+        await self.vk_player.prepare(vk_track)
+
+        # Только теперь запускается процесс захвата.
         source = self.audio_capture.create_source()
 
         try:
-            await asyncio.sleep(0.2)
-            await self.vk_player.play(vk_track)
-        except Exception:
-            source.cleanup()
-            raise
+            self._play_source(
+                voice_client,
+                source,
+            )
 
-        self._play_source(
-            voice_client,
-            source,
-        )
+            await asyncio.sleep(0.2)
+
+            await self.vk_player.play(
+                vk_track
+            )
+
+        except Exception:
+            if (
+                voice_client.is_playing()
+                or voice_client.is_paused()
+            ):
+                voice_client.stop()
+            else:
+                source.cleanup()
+
+            raise
 
         duration_seconds = self._duration_to_seconds(
             item.track.duration
@@ -194,6 +214,9 @@ class MusicPlayer:
             if error:
                 print(f"Playback error: {error}")
 
+            if self._closing:
+                return
+
             asyncio.run_coroutine_threadsafe(
                 self.play_next(guild_id),
                 loop,
@@ -204,11 +227,67 @@ class MusicPlayer:
             after=after_playback,
         )
 
+    async def close(self) -> None:
+        if self._closing:
+            return
+
+        self._closing = True
+
+        tasks = [
+            *self.idle_tasks.values(),
+            *self.live_end_tasks.values(),
+        ]
+
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+        if tasks:
+            await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+
+        self.idle_tasks.clear()
+        self.live_end_tasks.clear()
+
+        # Сначала останавливаем реальный VK player.
+        try:
+            await self.vk_player.pause_active()
+        except Exception:
+            pass
+
+        # Останавливаем Discord AudioPlayer.
+        # Это также завершит его FFmpeg source.
+        for guild in self.client.guilds:
+            voice_client = guild.voice_client
+
+            if voice_client is None:
+                continue
+
+            if (
+                voice_client.is_playing()
+                or voice_client.is_paused()
+            ):
+                voice_client.stop()
+
+        self.queues.clear()
+        self.current_tracks.clear()
+
+        # Platform-specific resources.
+        await self.audio_capture.close()
+
+        # Chrome + Playwright.
+        await self.vk_player.stop()
+
     async def play_next(
         self,
         guild_id: int,
     ) -> None:
         guild = self.client.get_guild(guild_id)
+
+        if self._closing:
+            return
 
         if guild is None:
             return

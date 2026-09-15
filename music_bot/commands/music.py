@@ -33,6 +33,9 @@ class MusicCog(commands.Cog):
     async def ping(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Pong!")
 
+    async def cog_unload(self) -> None:
+        await self.player.close()
+
     @app_commands.command(
         name="help",
         description="Показать список команд бота",
