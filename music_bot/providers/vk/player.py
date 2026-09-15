@@ -166,6 +166,17 @@ class VKPlayer:
 
         self.current_track = track
 
+    async def pause_active(self) -> None:
+        if self.page is None:
+            raise RuntimeError("VKPlayer не запущен")
+
+        pause_button = self.page.locator(
+            '[role="button"][aria-label="Поставить на\u00a0паузу"]'
+        ).first
+
+        if await pause_button.count():
+            await pause_button.press("Enter")                           
+
     async def pause(self) -> None:
         if self.current_track is None:
             raise RuntimeError("Нет текущего трека")

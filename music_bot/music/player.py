@@ -5,8 +5,10 @@ from collections import defaultdict, deque
 
 import discord
 
-from music_bot.music.models import QueueItem
+from music_bot.audio.windows import WindowsAudioCapture
+from music_bot.music.models import QueueItem, TrackCandidate
 from music_bot.providers.hitmo import USER_AGENT
+from music_bot.providers.vk.player import VKPlayer, VKTrack
 
 
 class MusicPlayer:
@@ -17,9 +19,14 @@ class MusicPlayer:
     ) -> None:
         self.client = client
         self.idle_timeout_seconds = idle_timeout_seconds
+
         self.queues: defaultdict[int, deque[QueueItem]] = defaultdict(deque)
         self.current_tracks: dict[int, QueueItem] = {}
         self.idle_tasks: dict[int, asyncio.Task[None]] = {}
+        self.live_end_tasks: dict[int, asyncio.Task[None]] = {}
+
+        self.vk_player = VKPlayer()
+        self.vk_audio = WindowsAudioCapture()
 
     def get_queue(self, guild_id: int) -> deque[QueueItem]:
         return self.queues[guild_id]
@@ -27,21 +34,30 @@ class MusicPlayer:
     def get_current(self, guild_id: int) -> QueueItem | None:
         return self.current_tracks.get(guild_id)
 
-    def start_live_source(
+    async def search_vk(
         self,
-        voice_client: discord.VoiceClient,
-        source: discord.AudioSource,
-    ) -> None:
-        guild_id = voice_client.guild.id
+        query: str,
+        limit: int,
+    ) -> list[TrackCandidate]:
+        if self.vk_player.page is None:
+            await self.vk_player.start()
 
-        self.cancel_idle_timer(guild_id)
+        tracks = await self.vk_player.search(
+            query,
+            limit=limit,
+        )
 
-        if voice_client.is_playing() or voice_client.is_paused():
-            voice_client.stop()
+        return [
+            TrackCandidate(
+                title=track.title,
+                artist=track.artist,
+                duration=track.duration,
+                source="vk",
+            )
+            for track in tracks
+        ]
 
-        voice_client.play(source)
-
-    def enqueue_or_play(
+    async def enqueue_or_play(
         self,
         voice_client: discord.VoiceClient,
         item: QueueItem,
@@ -53,17 +69,43 @@ class MusicPlayer:
             queue.append(item)
             return len(queue)
 
-        self.start_track(voice_client, item)
+        await self.start_track(
+            voice_client,
+            item,
+        )
+
         return None
 
-    def start_track(
+    async def start_track(
         self,
         voice_client: discord.VoiceClient,
         item: QueueItem,
     ) -> None:
         guild_id = voice_client.guild.id
+
         self.cancel_idle_timer(guild_id)
+        self.cancel_live_end_timer(guild_id)
+
         self.current_tracks[guild_id] = item
+
+        if item.track.source == "vk":
+            await self._start_vk_track(
+                voice_client,
+                item,
+            )
+        else:
+            self._start_hitmo_track(
+                voice_client,
+                item,
+            )
+
+    def _start_hitmo_track(
+        self,
+        voice_client: discord.VoiceClient,
+        item: QueueItem,
+    ) -> None:
+        if not item.track.stream_url:
+            raise RuntimeError("У Hitmo-трека отсутствует stream_url")
 
         source = discord.FFmpegPCMAudio(
             item.track.stream_url,
@@ -76,9 +118,82 @@ class MusicPlayer:
             options="-vn",
         )
 
+        self._play_source(
+            voice_client,
+            source,
+        )
+
+    async def _start_vk_track(
+        self,
+        voice_client: discord.VoiceClient,
+        item: QueueItem,
+    ) -> None:
+        if self.vk_player.page is None:
+            await self.vk_player.start()
+
+        query = (
+            f"{item.track.artist} "
+            f"{item.track.title}"
+        )
+
+        results = await self.vk_player.search(
+            query,
+            limit=20,
+        )
+
+        if not results:
+            raise RuntimeError(
+                f"VK не нашёл трек {item.track.display_name}"
+            )
+
+        vk_track = self._match_vk_track(
+            item.track,
+            results,
+        )
+
+        # FFmpeg начинает слушать VB-CABLE ещё до запуска трека.
+        source = self.vk_audio.create_source()
+
+        await asyncio.sleep(0.2)
+
+        try:
+            await self.vk_player.play(vk_track)
+        except Exception:
+            source.cleanup()
+            raise
+
+        self._play_source(
+            voice_client,
+            source,
+        )
+
+        duration_seconds = self._duration_to_seconds(
+            item.track.duration
+        )
+
+        if duration_seconds is not None:
+            guild_id = voice_client.guild.id
+
+            self.live_end_tasks[guild_id] = asyncio.create_task(
+                self._finish_live_track_after(
+                    guild_id=guild_id,
+                    voice_client=voice_client,
+                    item=item,
+                    seconds=duration_seconds,
+                )
+            )
+
+    def _play_source(
+        self,
+        voice_client: discord.VoiceClient,
+        source: discord.AudioSource,
+    ) -> None:
+        guild_id = voice_client.guild.id
         loop = asyncio.get_running_loop()
 
-        def after_playback(error: Exception | None) -> None:
+        def after_playback(
+            error: Exception | None,
+        ) -> None:
             if error:
                 print(f"Playback error: {error}")
 
@@ -87,40 +202,77 @@ class MusicPlayer:
                 loop,
             )
 
-        voice_client.play(source, after=after_playback)
+        voice_client.play(
+            source,
+            after=after_playback,
+        )
 
-    async def play_next(self, guild_id: int) -> None:
+    async def play_next(
+        self,
+        guild_id: int,
+    ) -> None:
         guild = self.client.get_guild(guild_id)
+
         if guild is None:
             return
 
         voice_client = guild.voice_client
+
         if voice_client is None:
             return
 
+        self.cancel_live_end_timer(guild_id)
+        self.current_tracks.pop(guild_id, None)
+
         queue = self.queues[guild_id]
+
         if not queue:
-            self.current_tracks.pop(guild_id, None)
             self.schedule_idle_disconnect(guild_id)
             return
 
         item = queue.popleft()
-        self.start_track(voice_client, item)
 
-        channel = self.client.get_channel(item.channel_id)
-        if channel is not None and hasattr(channel, "send"):
-            duration = item.track.duration or "?:??"
-            await channel.send(
-                f"▶️ **Сейчас играет:** "
-                f"{item.track.display_name} · `{duration}`"
+        try:
+            await self.start_track(
+                voice_client,
+                item,
+            )
+        except Exception as exc:
+            print(
+                f"Не удалось запустить "
+                f"{item.track.display_name}: {exc}"
             )
 
-    def clear(self, guild_id: int) -> None:
-        self.queues[guild_id].clear()
-        self.current_tracks.pop(guild_id, None)
+            await self.play_next(guild_id)
+            return
 
-    def stop(self, voice_client: discord.VoiceClient) -> None:
+        channel = self.client.get_channel(
+            item.channel_id
+        )
+
+        if channel is not None and hasattr(channel, "send"):
+            duration = item.track.duration or "?:??"
+
+            provider = (
+                "VK"
+                if item.track.source == "vk"
+                else "Hitmo"
+            )
+
+            await channel.send(
+                f"▶️ **Сейчас играет [{provider}]:** "
+                f"{item.track.display_name} · "
+                f"`{duration}`"
+            )
+
+    async def stop(
+        self,
+        voice_client: discord.VoiceClient,
+    ) -> None:
         guild_id = voice_client.guild.id
+
+        await self._pause_vk_if_needed(guild_id)
+
         self.clear(guild_id)
 
         if voice_client.is_playing() or voice_client.is_paused():
@@ -128,25 +280,71 @@ class MusicPlayer:
         else:
             self.schedule_idle_disconnect(guild_id)
 
-    def skip(self, voice_client: discord.VoiceClient) -> bool:
-        if not voice_client.is_playing() and not voice_client.is_paused():
+    async def skip(
+        self,
+        voice_client: discord.VoiceClient,
+    ) -> bool:
+        if (
+            not voice_client.is_playing()
+            and not voice_client.is_paused()
+        ):
             return False
 
+        guild_id = voice_client.guild.id
+
+        await self._pause_vk_if_needed(guild_id)
+        self.cancel_live_end_timer(guild_id)
+
         voice_client.stop()
+
         return True
 
-    async def disconnect(self, voice_client: discord.VoiceClient) -> None:
+    async def disconnect(
+        self,
+        voice_client: discord.VoiceClient,
+    ) -> None:
         guild_id = voice_client.guild.id
+
+        await self._pause_vk_if_needed(guild_id)
+
         self.cancel_idle_timer(guild_id)
         self.clear(guild_id)
+
         await voice_client.disconnect()
+
+    async def _pause_vk_if_needed(
+        self,
+        guild_id: int,
+    ) -> None:
+        current = self.current_tracks.get(guild_id)
+
+        if current is None:
+            return
+
+        if current.track.source != "vk":
+            return
+
+        try:
+            await self.vk_player.pause()
+        except Exception:
+            pass
+
+    def clear(
+        self,
+        guild_id: int,
+    ) -> None:
+        self.cancel_live_end_timer(guild_id)
+        self.queues[guild_id].clear()
+        self.current_tracks.pop(guild_id, None)
 
     def mark_idle(self, guild_id: int) -> None:
         guild = self.client.get_guild(guild_id)
+
         if guild is None or guild.voice_client is None:
             return
 
         voice_client = guild.voice_client
+
         if (
             voice_client.is_playing()
             or voice_client.is_paused()
@@ -157,25 +355,97 @@ class MusicPlayer:
         self.schedule_idle_disconnect(guild_id)
 
     def cancel_idle_timer(self, guild_id: int) -> None:
-        task = self.idle_tasks.pop(guild_id, None)
+        task = self.idle_tasks.pop(
+            guild_id,
+            None,
+        )
+
         if task and not task.done():
             task.cancel()
 
-    def schedule_idle_disconnect(self, guild_id: int) -> None:
+    def schedule_idle_disconnect(
+        self,
+        guild_id: int,
+    ) -> None:
         self.cancel_idle_timer(guild_id)
+
         self.idle_tasks[guild_id] = asyncio.create_task(
             self._idle_disconnect(guild_id)
         )
 
-    async def _idle_disconnect(self, guild_id: int) -> None:
-        try:
-            await asyncio.sleep(self.idle_timeout_seconds)
+    def cancel_live_end_timer(
+        self,
+        guild_id: int,
+    ) -> None:
+        task = self.live_end_tasks.pop(
+            guild_id,
+            None,
+        )
 
-            guild = self.client.get_guild(guild_id)
+        if (
+            task
+            and not task.done()
+            and task is not asyncio.current_task()
+        ):
+            task.cancel()
+
+    async def _finish_live_track_after(
+        self,
+        guild_id: int,
+        voice_client: discord.VoiceClient,
+        item: QueueItem,
+        seconds: int,
+    ) -> None:
+        try:
+            await asyncio.sleep(seconds)
+
+            if self.current_tracks.get(guild_id) is not item:
+                return
+
+            try:
+                await self.vk_player.pause_active()
+            except Exception as exc:
+                print(f"Не удалось остановить VK: {exc}")
+
+            if (
+                voice_client.is_playing()
+                or voice_client.is_paused()
+            ):
+                voice_client.stop()
+
+        except asyncio.CancelledError:
+            pass
+
+        finally:
+            current_task = asyncio.current_task()
+
+            if (
+                self.live_end_tasks.get(guild_id)
+                is current_task
+            ):
+                self.live_end_tasks.pop(
+                    guild_id,
+                    None,
+                )
+
+    async def _idle_disconnect(
+        self,
+        guild_id: int,
+    ) -> None:
+        try:
+            await asyncio.sleep(
+                self.idle_timeout_seconds
+            )
+
+            guild = self.client.get_guild(
+                guild_id
+            )
+
             if guild is None or guild.voice_client is None:
                 return
 
             voice_client = guild.voice_client
+
             if (
                 voice_client.is_playing()
                 or voice_client.is_paused()
@@ -183,12 +453,107 @@ class MusicPlayer:
             ):
                 return
 
-            print(f"Guild {guild.name}: отключаюсь из-за бездействия")
-            self.current_tracks.pop(guild_id, None)
+            print(
+                f"Guild {guild.name}: "
+                "отключаюсь из-за бездействия"
+            )
+
+            self.current_tracks.pop(
+                guild_id,
+                None,
+            )
+
             await voice_client.disconnect()
+
         except asyncio.CancelledError:
             pass
+
         finally:
             current_task = asyncio.current_task()
-            if self.idle_tasks.get(guild_id) is current_task:
-                self.idle_tasks.pop(guild_id, None)
+
+            if (
+                self.idle_tasks.get(guild_id)
+                is current_task
+            ):
+                self.idle_tasks.pop(
+                    guild_id,
+                    None,
+                )
+
+    @staticmethod
+    def _duration_to_seconds(
+        duration: str | None,
+    ) -> int | None:
+        if not duration:
+            return None
+
+        try:
+            parts = [
+                int(part)
+                for part in duration.split(":")
+            ]
+        except ValueError:
+            return None
+
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return minutes * 60 + seconds
+
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+
+            return (
+                hours * 3600
+                + minutes * 60
+                + seconds
+            )
+
+        return None
+
+    @staticmethod
+    def _match_vk_track(
+        wanted: TrackCandidate,
+        candidates: list[VKTrack],
+    ) -> VKTrack:
+        def normalize(value: str) -> str:
+            return " ".join(
+                value.replace("\xa0", " ")
+                .casefold()
+                .split()
+            )
+
+        wanted_artist = normalize(
+            wanted.artist
+        )
+        wanted_title = normalize(
+            wanted.title
+        )
+
+        def score(track: VKTrack) -> int:
+            result = 0
+
+            artist = normalize(track.artist)
+            title = normalize(track.title)
+
+            if artist == wanted_artist:
+                result += 100
+            elif wanted_artist in artist:
+                result += 40
+
+            if title == wanted_title:
+                result += 100
+            elif wanted_title in title:
+                result += 40
+
+            if (
+                wanted.duration
+                and track.duration == wanted.duration
+            ):
+                result += 20
+
+            return result
+
+        return max(
+            candidates,
+            key=score,
+        )

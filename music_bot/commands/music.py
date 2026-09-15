@@ -125,55 +125,106 @@ class MusicCog(commands.Cog):
             )
             return
 
-        self.player.stop(voice_client)
+        await self.player.stop(voice_client)
         await interaction.response.send_message("⏹ Воспроизведение остановлено.")
 
     @app_commands.command(
-        name="play",
-        description="Найти и включить трек",
+    name="play",
+    description="Найти и включить трек",
     )
-    @app_commands.describe(query="Название трека или исполнитель")
+    @app_commands.describe(
+        query="Название трека или исполнитель",
+        source="Источник музыки",
+    )
+    @app_commands.choices(
+        source=[
+            app_commands.Choice(
+                name="Hitmo",
+                value="hitmo",
+            ),
+            app_commands.Choice(
+                name="VK Музыка",
+                value="vk",
+            ),
+        ]
+    )
     async def play(
         self,
         interaction: discord.Interaction,
         query: str,
+        source: app_commands.Choice[str] | None = None,
     ) -> None:
         await interaction.response.defer()
 
+        source_name = (
+            source.value
+            if source is not None
+            else "hitmo"
+        )
+
         try:
-            tracks = await asyncio.to_thread(
-                self.provider.search,
-                query,
-                self.settings.search_limit,
-            )
+            if source_name == "vk":
+                tracks = await self.player.search_vk(
+                    query,
+                    self.settings.search_limit,
+                )
+            else:
+                tracks = await asyncio.to_thread(
+                    self.provider.search,
+                    query,
+                    self.settings.search_limit,
+                )
+
         except Exception as exc:
             print("SEARCH ERROR:", repr(exc))
+
             await interaction.followup.send(
                 f"Ошибка поиска: `{exc}`"
             )
             return
 
         if not tracks:
-            await interaction.followup.send("Ничего не найдено.")
+            await interaction.followup.send(
+                "Ничего не найдено."
+            )
             return
 
         lines = [
-            f"**{number}. {track.display_name}** · `{track.duration or '?:??'}`"
-            for number, track in enumerate(tracks, start=1)
+            (
+                f"**{number}. {track.display_name}** "
+                f"· `{track.duration or '?:??'}`"
+            )
+            for number, track in enumerate(
+                tracks,
+                start=1,
+            )
         ]
 
+        provider_title = (
+            "VK"
+            if source_name == "vk"
+            else "Hitmo"
+        )
+
         embed = discord.Embed(
-            title=f"🔎 Результаты: {query}",
+            title=f"🔎 {provider_title}: {query}",
             description="\n".join(lines),
         )
-        embed.set_footer(text="Выбери трек кнопкой ниже")
+
+        embed.set_footer(
+            text="Выбери трек кнопкой ниже"
+        )
 
         view = TrackSelectView(
             tracks=tracks,
             requester_id=interaction.user.id,
             player=self.player,
         )
-        await interaction.followup.send(embed=embed, view=view)
+
+        await interaction.followup.send(
+            embed=embed,
+            view=view,
+        )
 
     @app_commands.command(
         name="queue",
@@ -232,7 +283,7 @@ class MusicCog(commands.Cog):
             )
             return
 
-        if not self.player.skip(interaction.guild.voice_client):
+        if not await self.player.skip(interaction.guild.voice_client):
             await interaction.response.send_message(
                 "Сейчас ничего не играет.",
                 ephemeral=True,
@@ -240,93 +291,3 @@ class MusicCog(commands.Cog):
             return
 
         await interaction.response.send_message("⏭ Трек пропущен.")
-
-
-    @app_commands.command(
-    name="vkplay",
-    description="Найти и включить трек через VK Музыку",
-    )
-    @app_commands.describe(
-        query="Название трека или исполнитель",
-        result="Номер результата поиска VK",
-    )
-    async def vkplay(
-        self,
-        interaction: discord.Interaction,
-        query: str,
-        result: app_commands.Range[int, 1, 10] = 1,
-    ) -> None:
-        await interaction.response.defer()
-
-        if interaction.guild is None:
-            await interaction.followup.send(
-                "Эта команда доступна только на сервере."
-            )
-            return
-
-        voice_state = getattr(interaction.user, "voice", None)
-
-        if voice_state is None or voice_state.channel is None:
-            await interaction.followup.send(
-                "Сначала зайди в голосовой канал."
-            )
-            return
-
-        try:
-            # Подключаемся к voice.
-            voice_client = interaction.guild.voice_client
-            channel = voice_state.channel
-
-            if voice_client is None:
-                voice_client = await channel.connect()
-            elif voice_client.channel != channel:
-                await voice_client.move_to(channel)
-
-            # Chrome запускаем только при первом использовании VK.
-            if self.vk_player.page is None:
-                await self.vk_player.start()
-
-            tracks = await self.vk_player.search(
-                query,
-                limit=max(10, int(result)),
-            )
-
-            if not tracks:
-                await interaction.followup.send(
-                    "VK не нашёл треки."
-                )
-                return
-
-            if result > len(tracks):
-                await interaction.followup.send(
-                    f"VK вернул только {len(tracks)} результатов."
-                )
-                return
-
-            track = tracks[result - 1]
-
-            # Сначала запускаем захват VB-CABLE.
-            source = self.windows_audio.create_source()
-
-            self.player.start_live_source(
-                voice_client,
-                source,
-            )
-
-            # Даём FFmpeg немного времени подключиться к CABLE Output.
-            await asyncio.sleep(0.5)
-
-            # После этого запускаем сам VK-трек.
-            await self.vk_player.play(track)
-
-            await interaction.followup.send(
-                f"▶️ **VK:** {track.artist} — {track.title} "
-                f"· `{track.duration}`"
-            )
-
-        except Exception as exc:
-            print("VK PLAY ERROR:", repr(exc))
-
-            await interaction.followup.send(
-                f"Ошибка VK: `{exc}`"
-            )

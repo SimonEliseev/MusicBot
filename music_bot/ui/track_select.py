@@ -54,7 +54,7 @@ class TrackSelectButton(discord.ui.Button):
             track=self.track,
             channel_id=interaction.channel_id,
         )
-        position = self.player.enqueue_or_play(voice_client, item)
+        position = await self.player.enqueue_or_play(voice_client, item)
 
         for button in view.children:
             button.disabled = True
