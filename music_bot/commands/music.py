@@ -10,7 +10,8 @@ from music_bot.config import Settings
 from music_bot.music.player import MusicPlayer
 from music_bot.providers.hitmo import HitmoProvider
 from music_bot.ui.track_select import TrackSelectView
-
+from music_bot.audio.windows import WindowsAudioCapture
+from music_bot.providers.vk.player import VKPlayer
 
 class MusicCog(commands.Cog):
     def __init__(
@@ -24,6 +25,9 @@ class MusicCog(commands.Cog):
         self.settings = settings
         self.provider = provider
         self.player = player
+
+        self.vk_player = VKPlayer()
+        self.windows_audio = WindowsAudioCapture()
 
     @app_commands.command(name="ping", description="Проверить работу бота")
     async def ping(self, interaction: discord.Interaction) -> None:
@@ -236,3 +240,93 @@ class MusicCog(commands.Cog):
             return
 
         await interaction.response.send_message("⏭ Трек пропущен.")
+
+
+    @app_commands.command(
+    name="vkplay",
+    description="Найти и включить трек через VK Музыку",
+    )
+    @app_commands.describe(
+        query="Название трека или исполнитель",
+        result="Номер результата поиска VK",
+    )
+    async def vkplay(
+        self,
+        interaction: discord.Interaction,
+        query: str,
+        result: app_commands.Range[int, 1, 10] = 1,
+    ) -> None:
+        await interaction.response.defer()
+
+        if interaction.guild is None:
+            await interaction.followup.send(
+                "Эта команда доступна только на сервере."
+            )
+            return
+
+        voice_state = getattr(interaction.user, "voice", None)
+
+        if voice_state is None or voice_state.channel is None:
+            await interaction.followup.send(
+                "Сначала зайди в голосовой канал."
+            )
+            return
+
+        try:
+            # Подключаемся к voice.
+            voice_client = interaction.guild.voice_client
+            channel = voice_state.channel
+
+            if voice_client is None:
+                voice_client = await channel.connect()
+            elif voice_client.channel != channel:
+                await voice_client.move_to(channel)
+
+            # Chrome запускаем только при первом использовании VK.
+            if self.vk_player.page is None:
+                await self.vk_player.start()
+
+            tracks = await self.vk_player.search(
+                query,
+                limit=max(10, int(result)),
+            )
+
+            if not tracks:
+                await interaction.followup.send(
+                    "VK не нашёл треки."
+                )
+                return
+
+            if result > len(tracks):
+                await interaction.followup.send(
+                    f"VK вернул только {len(tracks)} результатов."
+                )
+                return
+
+            track = tracks[result - 1]
+
+            # Сначала запускаем захват VB-CABLE.
+            source = self.windows_audio.create_source()
+
+            self.player.start_live_source(
+                voice_client,
+                source,
+            )
+
+            # Даём FFmpeg немного времени подключиться к CABLE Output.
+            await asyncio.sleep(0.5)
+
+            # После этого запускаем сам VK-трек.
+            await self.vk_player.play(track)
+
+            await interaction.followup.send(
+                f"▶️ **VK:** {track.artist} — {track.title} "
+                f"· `{track.duration}`"
+            )
+
+        except Exception as exc:
+            print("VK PLAY ERROR:", repr(exc))
+
+            await interaction.followup.send(
+                f"Ошибка VK: `{exc}`"
+            )

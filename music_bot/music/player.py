@@ -27,6 +27,20 @@ class MusicPlayer:
     def get_current(self, guild_id: int) -> QueueItem | None:
         return self.current_tracks.get(guild_id)
 
+    def start_live_source(
+        self,
+        voice_client: discord.VoiceClient,
+        source: discord.AudioSource,
+    ) -> None:
+        guild_id = voice_client.guild.id
+
+        self.cancel_idle_timer(guild_id)
+
+        if voice_client.is_playing() or voice_client.is_paused():
+            voice_client.stop()
+
+        voice_client.play(source)
+
     def enqueue_or_play(
         self,
         voice_client: discord.VoiceClient,
