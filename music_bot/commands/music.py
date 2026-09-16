@@ -142,12 +142,12 @@ class MusicCog(commands.Cog):
     @app_commands.choices(
         source=[
             app_commands.Choice(
-                name="Hitmo",
-                value="hitmo",
-            ),
-            app_commands.Choice(
                 name="VK Музыка",
                 value="vk",
+                        ),
+            app_commands.Choice(
+                name="Hitmo",
+                value="hitmo",
             ),
         ]
     )
@@ -159,10 +159,10 @@ class MusicCog(commands.Cog):
     ) -> None:
         await interaction.response.defer()
 
-        source_name = (
+        source_value = (
             source.value
             if source is not None
-            else "hitmo"
+            else "vk"
         )
 
         try:
