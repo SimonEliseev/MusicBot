@@ -257,19 +257,21 @@ class MusicPlayer:
         except Exception:
             pass
 
-        # Останавливаем Discord AudioPlayer.
-        # Это также завершит его FFmpeg source.
-        for guild in self.client.guilds:
-            voice_client = guild.voice_client
+        for voice_client in list(self.client.voice_clients):
+            try:
+                if (
+                    voice_client.is_playing()
+                    or voice_client.is_paused()
+                ):
+                    voice_client.stop()
 
-            if voice_client is None:
-                continue
+                await asyncio.wait_for(
+                    voice_client.disconnect(force=True),
+                    timeout=3,
+                )
 
-            if (
-                voice_client.is_playing()
-                or voice_client.is_paused()
-            ):
-                voice_client.stop()
+            except Exception as exc:
+                print(f"Voice disconnect error: {exc}")
 
         self.queues.clear()
         self.current_tracks.clear()

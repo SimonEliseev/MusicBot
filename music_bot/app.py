@@ -48,9 +48,11 @@ class MusicBot(commands.Bot):
         print(f"Бот запущен: {self.user}")
 
     async def close(self) -> None:
-        await self.player.close()
-        self.provider.close()
-        await super().close()
+        try:
+            await self.player.close()
+            self.provider.close()
+        finally:
+            await super().close()
 
 
 def run() -> None:
