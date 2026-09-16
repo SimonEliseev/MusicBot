@@ -6,3 +6,4 @@ __pycache__/
 .vscode/
 .idea/
 **/browser_profile/
+native/macos/bin/chrome_audio_tap

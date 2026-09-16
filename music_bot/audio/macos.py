@@ -1,30 +1,41 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import discord
 
-from music_bot.audio.live_ffmpeg import LiveFFmpegSource
+from music_bot.audio.process_pcm import (
+    ProcessPCMSource,
+)
 
 
 class MacOSAudioCapture:
-    def __init__(
-        self,
-        device_name: str = "BlackHole 2ch",
-        ffmpeg_executable: str = "ffmpeg",
-    ) -> None:
-        self.device_name = device_name
-        self.ffmpeg_executable = ffmpeg_executable
+    def __init__(self) -> None:
+        project_root = (
+            Path(__file__)
+            .resolve()
+            .parents[2]
+        )
 
-    def create_source(self) -> discord.AudioSource:
-        return LiveFFmpegSource(
-            executable=self.ffmpeg_executable,
-            input_args=[
-                "-f",
-                "avfoundation",
-                "-thread_queue_size",
-                "512",
-                "-i",
-                f":{self.device_name}",
-            ],
+        self.helper_path = (
+            project_root
+            / "native"
+            / "macos"
+            / "bin"
+            / "chrome_audio_tap"
+        )
+
+    def create_source(
+        self,
+    ) -> discord.AudioSource:
+        if not self.helper_path.exists():
+            raise RuntimeError(
+                "macOS Chrome audio helper не найден: "
+                f"{self.helper_path}"
+            )
+
+        return ProcessPCMSource(
+            executable=self.helper_path,
         )
 
     async def close(self) -> None:
