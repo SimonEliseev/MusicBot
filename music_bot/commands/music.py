@@ -165,6 +165,12 @@ class MusicCog(commands.Cog):
             else "vk"
         )
 
+        source_name = (
+            source.value
+            if source is not None
+            else "vk"
+        )
+
         try:
             if source_name == "vk":
                 tracks = await self.player.search_vk(
